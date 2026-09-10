@@ -58,18 +58,9 @@ pub fn create_app_menu(app: &AppHandle) -> Result<Menu<Wry>, tauri::Error> {
         .build()?;
 
     // 4. Window Menu
-    #[cfg(target_os = "macos")]
     let window_menu = SubmenuBuilder::new(app, "Window")
         .item(&PredefinedMenuItem::minimize(app, None)?)
-        .item(&PredefinedMenuItem::zoom(app, None)?)
-        .separator()
-        .item(&PredefinedMenuItem::close_window(app, None)?)
-        .build()?;
-
-    #[cfg(not(target_os = "macos"))]
-    let window_menu = SubmenuBuilder::new(app, "Window")
-        .item(&PredefinedMenuItem::minimize(app, None)?)
-        .item(&MenuItemBuilder::with_id("toggle_maximize", "Maximize / Restore").build(app)?)
+        .item(&MenuItemBuilder::with_id("toggle_maximize", "Zoom / Maximize").build(app)?)
         .separator()
         .item(&PredefinedMenuItem::close_window(app, None)?)
         .build()?;
