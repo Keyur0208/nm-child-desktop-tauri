@@ -6,7 +6,7 @@ pub fn create_app_menu(app: &AppHandle) -> Result<Menu<Wry>, tauri::Error> {
     // 0. macOS Application Menu
     #[cfg(target_os = "macos")]
     let app_menu = SubmenuBuilder::new(app, "Nilkanth Medico")
-        .item(&PredefinedMenuItem::about(app, None)?)
+        .item(&PredefinedMenuItem::about(app, None, None)?)
         .separator()
         .item(&PredefinedMenuItem::services(app, None)?)
         .separator()
