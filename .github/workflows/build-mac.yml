@@ -1,0 +1,91 @@
+name: Build macOS Application
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_draft:
+        description: 'Create a GitHub Release draft'
+        required: false
+        default: false
+        type: boolean
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'
+
+jobs:
+  build-macos:
+    name: Build macOS (${{ matrix.arch }})
+    runs-on: macos-latest
+    permissions:
+      contents: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            arch: arm64-apple-silicon
+          - target: x86_64-apple-darwin
+            arch: x64-intel
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build macOS Application with Tauri
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Apple Developer Signing & Notarization secrets (optional, uses ad-hoc signing if unset)
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          args: --target ${{ matrix.target }}
+          tagName: ${{ github.ref_name }}
+          releaseName: 'Nilkanth Medico HOMS Child v__VERSION__'
+          releaseDraft: ${{ github.event.inputs.release_draft || false }}
+          prerelease: false
+
+      - name: Upload macOS DMG Artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Nilkanth-Medico-HOMS-Child-${{ matrix.arch }}-DMG
+          path: |
+            src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+          if-no-files-found: warn
+
+      - name: Upload macOS App Bundle Artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Nilkanth-Medico-HOMS-Child-${{ matrix.arch }}-App
+          path: |
+            src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app
+          if-no-files-found: warn

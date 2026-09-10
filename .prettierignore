@@ -1,0 +1,19 @@
+# Build outputs
+node_modules/
+dist/
+src-tauri/target/
+
+# Static / binary assets
+public/images/
+*.ico
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+*.enc
+*.pem
+
+# Dependency lock files
+package-lock.json
+yarn.lock
