@@ -22,8 +22,8 @@ export const ASSETS = {
 // ---------------------------------------------------------------------------
 export const SERVER = {
     port: 8081,
-    localUrl: 'http://app.nilkanthmedico.com',
-    serverlUrl: 'http://api.nilkanthmedico.com',
+    localUrl: 'https://app.nilkanthmedico.com',
+    serverlUrl: 'https://api.nilkanthmedico.com',
 } as const;
 
 // ---------------------------------------------------------------------------
