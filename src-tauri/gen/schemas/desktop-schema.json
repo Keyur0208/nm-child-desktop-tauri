@@ -345,6 +345,54 @@
       "description": "Permission identifier",
       "oneOf": [
         {
+          "description": "Default permissions for application commands\n#### This default permission set includes:\n\n- `allow-all-app-commands`\n- `allow-save-download-bytes`\n- `allow-filesystem-commands`\n- `allow-printer-commands`\n- `allow-system-commands`\n- `allow-window-commands`\n- `allow-services-commands`",
+          "type": "string",
+          "const": "default",
+          "markdownDescription": "Default permissions for application commands\n#### This default permission set includes:\n\n- `allow-all-app-commands`\n- `allow-save-download-bytes`\n- `allow-filesystem-commands`\n- `allow-printer-commands`\n- `allow-system-commands`\n- `allow-window-commands`\n- `allow-services-commands`"
+        },
+        {
+          "description": "Enables all desktop application commands",
+          "type": "string",
+          "const": "allow-all-app-commands",
+          "markdownDescription": "Enables all desktop application commands"
+        },
+        {
+          "description": "Enables filesystem commands",
+          "type": "string",
+          "const": "allow-filesystem-commands",
+          "markdownDescription": "Enables filesystem commands"
+        },
+        {
+          "description": "Enables printer commands",
+          "type": "string",
+          "const": "allow-printer-commands",
+          "markdownDescription": "Enables printer commands"
+        },
+        {
+          "description": "Enables save_download_bytes command",
+          "type": "string",
+          "const": "allow-save-download-bytes",
+          "markdownDescription": "Enables save_download_bytes command"
+        },
+        {
+          "description": "Enables logging and zoom commands",
+          "type": "string",
+          "const": "allow-services-commands",
+          "markdownDescription": "Enables logging and zoom commands"
+        },
+        {
+          "description": "Enables system commands",
+          "type": "string",
+          "const": "allow-system-commands",
+          "markdownDescription": "Enables system commands"
+        },
+        {
+          "description": "Enables window commands",
+          "type": "string",
+          "const": "allow-window-commands",
+          "markdownDescription": "Enables window commands"
+        },
+        {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",
           "type": "string",
           "const": "core:default",

@@ -3,7 +3,7 @@ use tauri::{AppHandle, Manager, Wry};
 
 /// Creates the native desktop application menu with Electron-like File, Edit, View, Window, and Help menus.
 pub fn create_app_menu(app: &AppHandle) -> Result<Menu<Wry>, tauri::Error> {
-    // 0. macOS Application Menu
+    // 0. macOS Application Menu (Apple Menu)
     #[cfg(target_os = "macos")]
     let app_menu = SubmenuBuilder::new(app, "Nilkanth Medico")
         .item(&PredefinedMenuItem::about(app, None, None)?)
@@ -18,10 +18,15 @@ pub fn create_app_menu(app: &AppHandle) -> Result<Menu<Wry>, tauri::Error> {
         .build()?;
 
     // 1. File Menu
+    #[cfg(target_os = "macos")]
     let file_menu = SubmenuBuilder::new(app, "File")
-        .item(&MenuItemBuilder::with_id("reload", "Reload").accelerator("CmdOrCtrl+R").build(app)?)
-        .item(&MenuItemBuilder::with_id("force_reload", "Force Reload").accelerator("CmdOrCtrl+Shift+R").build(app)?)
+        .item(&MenuItemBuilder::with_id("print", "Print...").accelerator("CmdOrCtrl+P").build(app)?)
         .separator()
+        .item(&PredefinedMenuItem::close_window(app, None)?)
+        .build()?;
+
+    #[cfg(not(target_os = "macos"))]
+    let file_menu = SubmenuBuilder::new(app, "File")
         .item(&MenuItemBuilder::with_id("print", "Print...").accelerator("CmdOrCtrl+P").build(app)?)
         .separator()
         .item(&MenuItemBuilder::with_id("exit", "Exit").accelerator("Alt+F4").build(app)?)
@@ -39,7 +44,7 @@ pub fn create_app_menu(app: &AppHandle) -> Result<Menu<Wry>, tauri::Error> {
         .item(&PredefinedMenuItem::select_all(app, None)?)
         .build()?;
 
-    // 3. View Menu
+    // 3. View Menu (Reload and Zoom controls)
     let view_menu = SubmenuBuilder::new(app, "View")
         .item(&MenuItemBuilder::with_id("reload", "Reload").accelerator("CmdOrCtrl+R").build(app)?)
         .item(&MenuItemBuilder::with_id("force_reload", "Force Reload").accelerator("CmdOrCtrl+Shift+R").build(app)?)
@@ -50,10 +55,18 @@ pub fn create_app_menu(app: &AppHandle) -> Result<Menu<Wry>, tauri::Error> {
         .item(&MenuItemBuilder::with_id("zoom_out", "Zoom Out").accelerator("CmdOrCtrl+-").build(app)?)
         .separator()
         .item(&MenuItemBuilder::with_id("toggle_fullscreen", "Toggle Full Screen").accelerator("F11").build(app)?)
-        .item(&MenuItemBuilder::with_id("toggle_maximize", "Toggle Maximize").build(app)?)
         .build()?;
 
     // 4. Window Menu
+    #[cfg(target_os = "macos")]
+    let window_menu = SubmenuBuilder::new(app, "Window")
+        .item(&PredefinedMenuItem::minimize(app, None)?)
+        .item(&PredefinedMenuItem::zoom(app, None)?)
+        .separator()
+        .item(&PredefinedMenuItem::close_window(app, None)?)
+        .build()?;
+
+    #[cfg(not(target_os = "macos"))]
     let window_menu = SubmenuBuilder::new(app, "Window")
         .item(&PredefinedMenuItem::minimize(app, None)?)
         .item(&MenuItemBuilder::with_id("toggle_maximize", "Maximize / Restore").build(app)?)
@@ -68,7 +81,7 @@ pub fn create_app_menu(app: &AppHandle) -> Result<Menu<Wry>, tauri::Error> {
         .item(&MenuItemBuilder::with_id("about", "About Nilkanth Medico HOMS").build(app)?)
         .build()?;
 
-    // Main Menu Bar
+    // Main Menu Bar Assembly
     #[cfg(target_os = "macos")]
     let menu = MenuBuilder::new(app)
         .items(&[&app_menu, &file_menu, &edit_menu, &view_menu, &window_menu, &help_menu])
@@ -93,6 +106,10 @@ pub fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
     };
 
     match id {
+        "print" => {
+            crate::services::logging::log_info("[Menu] Print menu item triggered");
+            let _ = main_win.eval("window.focus(); window.print();");
+        }
         "exit" => {
             let a_handle = app.clone();
             let w_clone = main_win.clone();

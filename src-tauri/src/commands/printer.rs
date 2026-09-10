@@ -1,7 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::fs;
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -204,14 +201,30 @@ pub async fn silent_print_pdf(
     printer_name: String,
 ) -> Result<PrintResult, String> {
     crate::services::logging::log_info(&format!(
-        "[Print] Silent PDF print requested for printer: {}",
+        "[Print] Silent PDF print requested for printer: \"{}\"",
         printer_name
     ));
 
-    // 1. Verify printer exists
+    // 1. Flexible printer lookup
     let printers = get_system_printers();
-    let exists = printers.iter().any(|p| p.name == printer_name);
-    if !exists && !printers.is_empty() {
+    let trimmed_req = printer_name.trim();
+    let with_underscores = trimmed_req.replace(' ', "_");
+    let target_printer = if trimmed_req.is_empty() {
+        printers.iter().find(|p| p.is_default)
+    } else {
+        printers.iter().find(|p| {
+            p.name.eq_ignore_ascii_case(trimmed_req)
+                || p.display_name.eq_ignore_ascii_case(trimmed_req)
+                || p.name.eq_ignore_ascii_case(&with_underscores)
+        })
+    };
+
+    if !printers.is_empty() && target_printer.is_none() && !trimmed_req.is_empty() {
+        crate::services::logging::log_warn(&format!(
+            "[Print] Printer \"{}\" not found in system printer list: {:?}",
+            printer_name,
+            printers.iter().map(|p| &p.name).collect::<Vec<_>>()
+        ));
         return Ok(PrintResult {
             success: false,
             code: Some("PRINTER_NOT_FOUND".to_string()),
@@ -219,46 +232,37 @@ pub async fn silent_print_pdf(
         });
     }
 
-    // 2. Write temp PDF
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    let temp_dir = std::env::temp_dir();
-    let pdf_path = temp_dir.join(format!("homs-temp-{}.pdf", now_ms));
+    let resolved_name = target_printer
+        .map(|p| p.name.as_str())
+        .unwrap_or(trimmed_req);
 
-    if let Err(e) = fs::write(&pdf_path, &pdf_bytes) {
-        crate::services::logging::log_error(&format!("[Print] Failed to write temp PDF: {}", e));
-        return Ok(PrintResult {
-            success: false,
-            code: Some("WRITE_FAILED".to_string()),
-            message: Some(e.to_string()),
-        });
-    }
-
-    // 3. Print using OS print spooler command
+    // 2. Print using OS print spooler
     #[cfg(windows)]
-    let print_status = execute_windows_print(&pdf_path, &printer_name);
+    let print_status = execute_windows_print_pdf(&pdf_bytes, resolved_name);
 
     #[cfg(target_os = "macos")]
-    let print_status = execute_mac_print(&pdf_path, &printer_name);
+    let print_status = execute_mac_print_bytes(&pdf_bytes, resolved_name);
 
     #[cfg(not(any(windows, target_os = "macos")))]
     let print_status = Ok(());
 
-    // 4. Clean up temp PDF
-    let _ = fs::remove_file(&pdf_path);
-    crate::services::logging::log_info(&format!(
-        "[Print] Temporary PDF file deleted: {:?}",
-        pdf_path
-    ));
-
     match print_status {
-        Ok(_) => Ok(PrintResult {
-            success: true,
-            code: None,
-            message: Some(format!("Printed on {}", printer_name)),
-        }),
+        Ok(_) => {
+            let label = if resolved_name.is_empty() {
+                "system default printer"
+            } else {
+                resolved_name
+            };
+            crate::services::logging::log_info(&format!(
+                "[Print] Print job successfully submitted to {}",
+                label
+            ));
+            Ok(PrintResult {
+                success: true,
+                code: None,
+                message: Some(format!("Printed on {}", label)),
+            })
+        }
         Err(err) => {
             crate::services::logging::log_error(&format!("[Print] Silent PDF print failed: {}", err));
             Ok(PrintResult {
@@ -271,26 +275,44 @@ pub async fn silent_print_pdf(
 }
 
 #[cfg(windows)]
-fn execute_windows_print(pdf_path: &PathBuf, printer_name: &str) -> Result<(), String> {
+fn execute_windows_print_pdf(pdf_bytes: &[u8], printer_name: &str) -> Result<(), String> {
+    use std::fs;
     use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
-    // First attempt: PowerShell Start-Process with printto verb
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let temp_dir = std::env::temp_dir();
+    let pdf_path = temp_dir.join(format!("homs-temp-{}.pdf", now_ms));
+
+    fs::write(&pdf_path, pdf_bytes).map_err(|e| format!("Failed to write temp PDF: {}", e))?;
+
     let path_str = pdf_path.to_str().unwrap_or_default();
-    let ps_cmd = format!(
-        "Start-Process -FilePath '{}' -ArgumentList '\"{}\"' -Verb printto -PassThru | ForEach-Object {{ $_.WaitForExit(15000); if (-not $_.HasExited) {{ $_.Kill() }} }}",
-        path_str.replace('\'', "''"),
-        printer_name.replace('"', "\\\"")
-    );
+    let ps_cmd = if printer_name.is_empty() {
+        format!(
+            "Start-Process -FilePath '{}' -Verb print -PassThru | ForEach-Object {{ $_.WaitForExit(15000); if (-not $_.HasExited) {{ $_.Kill() }} }}",
+            path_str.replace('\'', "''")
+        )
+    } else {
+        format!(
+            "Start-Process -FilePath '{}' -ArgumentList '\"{}\"' -Verb printto -PassThru | ForEach-Object {{ $_.WaitForExit(15000); if (-not $_.HasExited) {{ $_.Kill() }} }}",
+            path_str.replace('\'', "''"),
+            printer_name.replace('"', "\\\"")
+        )
+    };
 
     let output = Command::new("powershell")
         .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &ps_cmd])
         .output();
 
+    let _ = fs::remove_file(&pdf_path);
+
     match output {
         Ok(out) if out.status.success() => Ok(()),
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr);
-            // Fallback attempt: Run via Rundll32 or system default spooler
             if stderr.is_empty() {
                 Ok(())
             } else {
@@ -302,26 +324,53 @@ fn execute_windows_print(pdf_path: &PathBuf, printer_name: &str) -> Result<(), S
 }
 
 #[cfg(target_os = "macos")]
-fn execute_mac_print(pdf_path: &PathBuf, printer_name: &str) -> Result<(), String> {
-    use std::process::Command;
-    let mut cmd = Command::new("lp");
+fn execute_mac_print_bytes(pdf_bytes: &[u8], printer_name: &str) -> Result<(), String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let lp_bin = if std::path::Path::new("/usr/bin/lp").exists() {
+        "/usr/bin/lp"
+    } else {
+        "lp"
+    };
+
+    let mut cmd = Command::new(lp_bin);
     if !printer_name.is_empty() {
         cmd.arg("-d").arg(printer_name);
     }
-    cmd.arg(pdf_path);
+    // Ensure receipts and documents scale to printable boundaries cleanly
+    cmd.arg("-o").arg("fit-to-page");
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
 
-    let output = cmd
-        .output()
-        .map_err(|e| format!("Failed to execute macOS lp command: {}", e))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to spawn macOS lp command ({}): {}", lp_bin, e))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(pdf_bytes)
+            .map_err(|e| format!("Failed to stream PDF bytes to lp stdin: {}", e))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("Failed to wait for macOS lp command: {}", e))?;
 
     if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        crate::services::logging::log_info(&format!(
+            "[Print] macOS lp queued successfully: {}",
+            stdout.trim()
+        ));
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         Err(if stderr.is_empty() {
             "macOS lp print command exited with error".to_string()
         } else {
-            stderr.to_string()
+            stderr.trim().to_string()
         })
     }
 }
@@ -334,8 +383,8 @@ pub async fn silent_print(
     let name = printer_name.unwrap_or_else(get_default_printer_internal);
     crate::services::logging::log_info(&format!("[Print] Silent print requested on {}", name));
 
-    // Triggers webview print via JS eval
-    let script = "window.print();";
+    // Ensure window has focus before initiating browser print dialog
+    let script = "window.focus(); window.print();";
     match window.eval(script) {
         Ok(_) => Ok(PrintResult {
             success: true,

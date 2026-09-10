@@ -1,0 +1,86 @@
+[default]
+description = "Default permissions for application commands"
+permissions = [
+    "allow-all-app-commands",
+    "allow-save-download-bytes",
+    "allow-filesystem-commands",
+    "allow-printer-commands",
+    "allow-system-commands",
+    "allow-window-commands",
+    "allow-services-commands"
+]
+
+[[permission]]
+identifier = "allow-all-app-commands"
+description = "Enables all desktop application commands"
+commands.allow = [
+    "get_system_info",
+    "inject_resource_info",
+    "get_printers",
+    "silent_print",
+    "silent_print_pdf",
+    "get_app_storage_paths",
+    "save_document_file",
+    "save_download_bytes",
+    "confirm_and_close_app",
+    "clear_session_keys",
+    "restore_window",
+    "reload_window",
+    "trim_memory",
+    "log_diagnostic",
+    "log_auth_event",
+    "get_zoom_level",
+    "set_zoom_level"
+]
+
+[[permission]]
+identifier = "allow-save-download-bytes"
+description = "Enables save_download_bytes command"
+commands.allow = ["save_download_bytes"]
+
+[[permission]]
+identifier = "allow-filesystem-commands"
+description = "Enables filesystem commands"
+commands.allow = [
+    "get_app_storage_paths",
+    "save_document_file",
+    "save_download_bytes"
+]
+
+[[permission]]
+identifier = "allow-printer-commands"
+description = "Enables printer commands"
+commands.allow = [
+    "get_printers",
+    "silent_print",
+    "silent_print_pdf"
+]
+
+[[permission]]
+identifier = "allow-system-commands"
+description = "Enables system commands"
+commands.allow = [
+    "get_system_info",
+    "inject_resource_info"
+]
+
+[[permission]]
+identifier = "allow-window-commands"
+description = "Enables window commands"
+commands.allow = [
+    "confirm_and_close_app",
+    "clear_session_keys",
+    "restore_window",
+    "reload_window",
+    "trim_memory"
+]
+
+[[permission]]
+identifier = "allow-services-commands"
+description = "Enables logging and zoom commands"
+commands.allow = [
+    "log_diagnostic",
+    "log_auth_event",
+    "get_zoom_level",
+    "set_zoom_level"
+]
