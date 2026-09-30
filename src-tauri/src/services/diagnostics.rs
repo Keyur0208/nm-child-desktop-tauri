@@ -9,8 +9,8 @@ use tauri::{AppHandle, Manager};
 
 const RELAUNCH_START_HOUR: u32 = 3;
 const RELAUNCH_END_HOUR: u32 = 4;
-const TRIM_MEMORY_THRESHOLD_MB: u64 = 1000;    // Auto-trim RAM cache at 1000 MB without restart
-const WARNING_BANNER_THRESHOLD_MB: u64 = 1800; // Show Warning Banner if user is working and RAM >= 1800 MB
+const TRIM_MEMORY_THRESHOLD_MB: u64 = 800;    // Auto-trim RAM cache silently at 800 MB without any popup or restart
+const IDLE_TRIM_THRESHOLD_MB: u64 = 500;       // Auto-trim RAM cache silently when user is briefly idle (>= 1 min)
 const SOFT_RELOAD_IDLE_MB: u64 = 2200;         // Soft reload page if user is idle and RAM >= 2200 MB
 const HARD_RESTART_CRITICAL_MB: u64 = 3500;    // Only full process restart if memory exceeds 3500 MB while idle
 const IDLE_MINUTES_THRESHOLD: u64 = 15;
@@ -140,91 +140,7 @@ pub fn soft_reload_page(window: &tauri::WebviewWindow, reason: &str) {
     let _ = window.eval(script);
 }
 
-/// Displays an elegant, non-intrusive memory notification banner (like VS Code / Slack).
-pub fn show_memory_warning_banner(window: &tauri::WebviewWindow, mem_mb: u64) {
-    let script = format!(
-        r#"
-        (function() {{
-            if (document.getElementById('nm-memory-banner')) {{
-                const textEl = document.getElementById('nm-memory-text');
-                if (textEl) textEl.textContent = 'High Memory Usage ({mem_mb} MB): Please save your work.';
-                return;
-            }}
-            const banner = document.createElement('div');
-            banner.id = 'nm-memory-banner';
-            banner.setAttribute('style', 'position:fixed;top:16px;right:16px;z-index:9999999;background:rgba(15,23,42,0.94);color:#f8fafc;padding:10px 16px;border-radius:10px;box-shadow:0 10px 25px -5px rgba(0,0,0,0.5);border:1px solid rgba(234,179,8,0.7);font-family:system-ui,-apple-system,sans-serif;display:flex;align-items:center;gap:12px;font-size:13px;backdrop-filter:blur(8px);animation:fadeIn 0.3s ease;');
-            banner.innerHTML = `
-                <div style="display:flex;align-items:center;gap:8px;">
-                    <span style="font-size:16px;">⚠️</span>
-                    <span id="nm-memory-text" style="font-weight:500;">High RAM ({mem_mb} MB): Please save work.</span>
-                </div>
-                <div style="display:flex;align-items:center;gap:6px;margin-left:6px;">
-                    <button id="nm-btn-freeram" style="background:#0284c7;color:#fff;border:none;padding:5px 10px;border-radius:6px;cursor:pointer;font-weight:600;font-size:11px;transition:background 0.2s;">Free RAM</button>
-                    <button id="nm-btn-softreload" style="background:#059669;color:#fff;border:none;padding:5px 10px;border-radius:6px;cursor:pointer;font-weight:600;font-size:11px;transition:background 0.2s;">Save & Reload</button>
-                    <button id="nm-btn-close-banner" style="background:transparent;color:#94a3b8;border:none;cursor:pointer;font-size:16px;padding:0 4px;line-height:1;">✕</button>
-                </div>
-            `;
-            document.body.appendChild(banner);
 
-            const btnFree = document.getElementById('nm-btn-freeram');
-            if (btnFree) {{
-                btnFree.onclick = function() {{
-                    btnFree.textContent = 'Freeing...';
-                    try {{
-                        if (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke) {{
-                            window.__TAURI_INTERNALS__.invoke('trim_memory').then(() => {{
-                                btnFree.textContent = '✅ Freed!';
-                                setTimeout(() => banner.remove(), 2000);
-                            }}).catch(() => {{ banner.remove(); }});
-                        }} else if (window.__TAURI__ && window.__TAURI__.core) {{
-                            window.__TAURI__.core.invoke('trim_memory').then(() => {{
-                                btnFree.textContent = '✅ Freed!';
-                                setTimeout(() => banner.remove(), 2000);
-                            }}).catch(() => {{ banner.remove(); }});
-                        }} else {{
-                            banner.remove();
-                        }}
-                    }} catch(e) {{
-                        banner.remove();
-                    }}
-                }};
-            }}
-
-            const btnReload = document.getElementById('nm-btn-softreload');
-            if (btnReload) {{
-                btnReload.onclick = function() {{
-                    try {{
-                        if (window.location && window.location.href) {{
-                            localStorage.setItem('__nm_last_active_url', window.location.href);
-                        }}
-                    }} catch(e) {{}}
-                    window.location.reload();
-                }};
-            }}
-
-            const btnClose = document.getElementById('nm-btn-close-banner');
-            if (btnClose) {{
-                btnClose.onclick = function() {{
-                    banner.remove();
-                }};
-            }}
-        }})();
-        "#,
-        mem_mb = mem_mb
-    );
-    let _ = window.eval(&script);
-}
-
-/// Removes the memory warning banner when memory returns to safe levels.
-pub fn remove_memory_warning_banner(window: &tauri::WebviewWindow) {
-    let script = r#"
-        (function() {
-            const b = document.getElementById('nm-memory-banner');
-            if (b) b.remove();
-        })();
-    "#;
-    let _ = window.eval(script);
-}
 
 fn get_last_restart_file(app: &AppHandle) -> Option<std::path::PathBuf> {
     app.path().app_data_dir().ok().map(|p| p.join("last_nightly_restart.txt"))
@@ -250,11 +166,10 @@ pub fn start_memory_watchdog(app: AppHandle) {
         let root_pid = Pid::from_u32(std::process::id());
         let start_time = Instant::now();
         let mut loop_counter: u64 = 0;
-        let mut banner_visible = false;
 
         crate::services::logging::log_info(&format!(
-            "[Watchdog] 24x7 Watchdog active | Daily window: {:02}:00 - {:02}:00 IST | Trim: {} MB | Warning Banner: {} MB | Soft Reload: {} MB | Idle: {} min",
-            RELAUNCH_START_HOUR, RELAUNCH_END_HOUR, TRIM_MEMORY_THRESHOLD_MB, WARNING_BANNER_THRESHOLD_MB, SOFT_RELOAD_IDLE_MB, IDLE_MINUTES_THRESHOLD
+            "[Watchdog] 24x7 Silent Memory Watchdog active | Auto-Trim: {} MB (Idle: {} MB) | Soft Reload (Idle 15m): {} MB",
+            TRIM_MEMORY_THRESHOLD_MB, IDLE_TRIM_THRESHOLD_MB, SOFT_RELOAD_IDLE_MB
         ));
 
         loop {
@@ -294,24 +209,16 @@ pub fn start_memory_watchdog(app: AppHandle) {
                 }
             }
 
-            // 1. Windows EmptyWorkingSet auto-trimming (RAM >= 1000 MB) — NO restart, NO logout
-            if total_mem_mb >= TRIM_MEMORY_THRESHOLD_MB {
+            // 1. Silent Automatic RAM Trimming (Win32 EmptyWorkingSet) — completely invisible to user:
+            // Triggers automatically without ANY popup/banner, dialogue, or user disruption:
+            // - Triggers when RAM >= TRIM_MEMORY_THRESHOLD_MB (800 MB)
+            // - OR whenever user is briefly idle (>= 1 min) and RAM >= IDLE_TRIM_THRESHOLD_MB (500 MB)
+            if total_mem_mb >= TRIM_MEMORY_THRESHOLD_MB || (idle_sec >= 60 && total_mem_mb >= IDLE_TRIM_THRESHOLD_MB) {
                 crate::services::logging::log_info(&format!(
-                    "[Watchdog] Elevated RAM ({} MB >= {} MB). Triggering Win32 EmptyWorkingSet trimming...",
-                    total_mem_mb, TRIM_MEMORY_THRESHOLD_MB
+                    "[Watchdog] Silent background RAM trim executed (Total RAM: {} MB, Idle: {}s)",
+                    total_mem_mb, idle_sec
                 ));
                 trim_process_tree_memory(&pids);
-            }
-
-            // 2. Warning Banner: If user is working actively and RAM >= 1800 MB, show non-intrusive banner
-            if let Some(window) = app.get_webview_window("main") {
-                if total_mem_mb >= WARNING_BANNER_THRESHOLD_MB && !is_idle {
-                    show_memory_warning_banner(&window, total_mem_mb);
-                    banner_visible = true;
-                } else if banner_visible && total_mem_mb < 1400 {
-                    remove_memory_warning_banner(&window);
-                    banner_visible = false;
-                }
             }
 
             // 3. Soft Refresh: If RAM >= 2200 MB AND user has been idle for 15+ min, reload page cleanly

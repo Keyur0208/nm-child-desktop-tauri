@@ -85,11 +85,37 @@ pub async fn save_download_bytes(
     // Sanitize filename
     let sanitized_filename = filename
         .replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
-    let clean_filename = if sanitized_filename.trim().is_empty() {
-        "download.pdf".to_string()
+    let mut clean_filename = if sanitized_filename.trim().is_empty() {
+        "download".to_string()
     } else {
         sanitized_filename.trim().to_string()
     };
+
+    // Auto-detect file format from magic bytes to guarantee Excel files are accurately named
+    let has_ext = std::path::Path::new(&clean_filename).extension().is_some();
+    if !has_ext || clean_filename.ends_with(".pdf") {
+        if bytes.starts_with(b"PK\x03\x04") {
+            // Modern Excel XLSX
+            clean_filename = if clean_filename.ends_with(".pdf") {
+                format!("{}.xlsx", &clean_filename[..clean_filename.len() - 4])
+            } else {
+                format!("{}.xlsx", clean_filename)
+            };
+        } else if bytes.starts_with(b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1") {
+            // Legacy Excel XLS (BIFF8)
+            clean_filename = if clean_filename.ends_with(".pdf") {
+                format!("{}.xls", &clean_filename[..clean_filename.len() - 4])
+            } else {
+                format!("{}.xls", clean_filename)
+            };
+        } else if bytes.starts_with(b"%PDF-") {
+            if !clean_filename.ends_with(".pdf") {
+                clean_filename = format!("{}.pdf", clean_filename);
+            }
+        } else if !has_ext {
+            clean_filename = format!("{}.xlsx", clean_filename);
+        }
+    }
 
     let download_dir = app
         .path()
@@ -97,6 +123,40 @@ pub async fn save_download_bytes(
         .or_else(|_| app.path().home_dir().map(|h| h.join("Downloads")))
         .unwrap_or_else(|_| std::env::temp_dir());
 
+    if !download_dir.exists() {
+        let _ = std::fs::create_dir_all(&download_dir);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut target = download_dir.join(&clean_filename);
+        if target.exists() {
+            let stem = target.file_stem().and_then(|s| s.to_str()).unwrap_or("download");
+            let ext = target.extension().and_then(|e| e.to_str()).unwrap_or("");
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let new_name = if ext.is_empty() {
+                format!("{}_{}", stem, now)
+            } else {
+                format!("{}_{}.{}", stem, now, ext)
+            };
+            target = download_dir.join(new_name);
+        }
+
+        fs::write(&target, &bytes)
+            .map_err(|e| format!("Failed to save downloaded file: {}", e))?;
+
+        crate::services::logging::log_info(&format!(
+            "[Download] macOS saved file directly to Downloads: {:?}",
+            target
+        ));
+
+        return Ok(target.to_string_lossy().to_string());
+    }
+
+    #[cfg(not(target_os = "macos"))]
     let mut builder = app
         .dialog()
         .file()
@@ -104,6 +164,7 @@ pub async fn save_download_bytes(
         .set_file_name(&clean_filename)
         .set_directory(&download_dir);
 
+    #[cfg(not(target_os = "macos"))]
     if let Some(ext) = std::path::Path::new(&clean_filename).extension().and_then(|e| e.to_str()) {
         builder = builder.add_filter(format!("{} File (*.{})", ext.to_uppercase(), ext), &[ext]);
     }

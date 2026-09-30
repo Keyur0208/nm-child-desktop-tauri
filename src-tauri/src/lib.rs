@@ -91,7 +91,23 @@ pub fn run() {
                         let filename = destination
                             .file_name()
                             .map(|f| f.to_string_lossy().to_string())
-                            .unwrap_or_else(|| "download.pdf".to_string());
+                            .filter(|n| !n.is_empty() && n != "download")
+                            .or_else(|| {
+                                url.path_segments()
+                                    .and_then(|s| s.last())
+                                    .filter(|f| !f.is_empty() && f.contains('.'))
+                                    .map(|f| f.to_string())
+                            })
+                            .unwrap_or_else(|| {
+                                let u = url.as_str().to_lowercase();
+                                if u.contains("excel") || u.contains("xlsx") || u.contains("sheet") {
+                                    "export.xlsx".to_string()
+                                } else if u.contains("csv") {
+                                    "export.csv".to_string()
+                                } else {
+                                    "download.pdf".to_string()
+                                }
+                            });
 
                         services::logging::log_info(&format!(
                             "[Download] Requested: url={}, filename={}",
@@ -290,15 +306,56 @@ fn get_client_enhancements_script() -> &'static str {
             } catch (e) {}
         }
 
+        // Track Blob URLs and their MIME types for accurate extension detection
+        var blobMetaMap = {};
+        try {
+            var origCreateObjectURL = URL.createObjectURL;
+            URL.createObjectURL = function(blob) {
+                var url = origCreateObjectURL.apply(this, arguments);
+                if (blob && typeof blob === 'object' && blob.type) {
+                    blobMetaMap[url] = blob.type;
+                }
+                return url;
+            };
+        } catch(e) {}
+
         // 3. Save Blob / Data URLs directly to Downloads via native Rust command
         function saveBlobNative(href, filename) {
-            console.log('[Tauri Native] Intercepted blob download:', filename);
+            console.log('[Tauri Native] Intercepted download:', filename, href ? href.substring(0, 60) : '');
             fetch(href)
-                .then(function(res) { return res.arrayBuffer(); })
+                .then(function(res) {
+                    // Try getting filename from header if not provided
+                    if (!filename || filename === 'download.pdf') {
+                        var cd = res.headers.get('content-disposition');
+                        if (cd && cd.indexOf('filename=') !== -1) {
+                            var match = cd.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
+                            if (match && match[1]) {
+                                filename = match[1].replace(/['"]/g, '').trim();
+                            }
+                        }
+                    }
+                    var ct = res.headers.get('content-type') || (blobMetaMap[href] || '');
+                    if ((!filename || filename.indexOf('.') === -1 || filename === 'download.pdf') && ct) {
+                        if (ct.indexOf('spreadsheetml') !== -1 || ct.indexOf('excel') !== -1) {
+                            filename = 'export.xlsx';
+                        } else if (ct.indexOf('csv') !== -1) {
+                            filename = 'export.csv';
+                        }
+                    }
+                    if (!filename) filename = 'export.xlsx';
+
+                    return res.arrayBuffer();
+                })
                 .then(function(buffer) {
                     var bytes = Array.from(new Uint8Array(buffer));
+                    var invokeFn = null;
                     if (window.__TAURI_INTERNALS__ && typeof window.__TAURI_INTERNALS__.invoke === 'function') {
-                        window.__TAURI_INTERNALS__.invoke('save_download_bytes', {
+                        invokeFn = window.__TAURI_INTERNALS__.invoke;
+                    } else if (window.__TAURI__ && window.__TAURI__.core && typeof window.__TAURI__.core.invoke === 'function') {
+                        invokeFn = window.__TAURI__.core.invoke;
+                    }
+                    if (invokeFn) {
+                        invokeFn('save_download_bytes', {
                             filename: filename,
                             bytes: bytes
                         }).then(function(savedPath) {
@@ -321,12 +378,32 @@ fn get_client_enhancements_script() -> &'static str {
                 });
         }
 
-        // 4. Intercept Blob / Data URL Downloads on macOS WKWebView
+        // 4. Intercept Blob / Data URL / Excel Downloads on macOS WKWebView
         function setupBlobDownloadInterceptor() {
             if (window.__nm_download_interceptor_set__) return;
             window.__nm_download_interceptor_set__ = true;
 
-            // Intercept standard click events
+            function isDownloadTarget(el, href) {
+                var hasDownload = el.hasAttribute('download') || (typeof el.download === 'string' && el.download.length > 0);
+                var isBlobOrData = href.startsWith('blob:') || href.startsWith('data:');
+                var lowerHref = href.toLowerCase();
+                var isExcelFile = lowerHref.indexOf('.xlsx') !== -1 || lowerHref.indexOf('.xls') !== -1 || lowerHref.indexOf('.csv') !== -1;
+                return (hasDownload || isBlobOrData || isExcelFile);
+            }
+
+            function getFilename(el, href) {
+                var fn = el.download || el.getAttribute('download') || '';
+                if (!fn && href) {
+                    try {
+                        var parts = href.split('/');
+                        var last = parts[parts.length - 1].split('?')[0];
+                        if (last && last.indexOf('.') !== -1) fn = decodeURIComponent(last);
+                    } catch(e) {}
+                }
+                return fn;
+            }
+
+            // 1. Intercept standard click events (capture phase)
             document.addEventListener('click', function(e) {
                 var el = e.target;
                 while (el && el.tagName !== 'A') {
@@ -334,30 +411,86 @@ fn get_client_enhancements_script() -> &'static str {
                 }
                 if (!el || el.tagName !== 'A') return;
 
-                var hasDownload = el.hasAttribute('download');
-                var href = el.getAttribute('href') || el.href || '';
-
-                if (hasDownload && (href.startsWith('blob:') || href.startsWith('data:'))) {
-                    e.preventDefault();
-                    e.stopPropagation();
-
-                    var filename = el.getAttribute('download') || 'download.pdf';
-                    saveBlobNative(href, filename);
+                var href = el.href || el.getAttribute('href') || '';
+                if (isDownloadTarget(el, href)) {
+                    var fn = getFilename(el, href);
+                    if (href.startsWith('blob:') || href.startsWith('data:') || href.toLowerCase().indexOf('.xlsx') !== -1 || href.toLowerCase().indexOf('.xls') !== -1 || href.toLowerCase().indexOf('.csv') !== -1) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        saveBlobNative(href, fn);
+                    }
                 }
             }, true);
 
-            // Intercept programmatic .click() on dynamically created unattached anchor elements
+            // 2. Intercept programmatic .click() on dynamically created anchor elements
             try {
                 var origClick = HTMLAnchorElement.prototype.click;
                 HTMLAnchorElement.prototype.click = function() {
-                    var hasDownload = this.hasAttribute('download');
-                    var href = this.getAttribute('href') || this.href || '';
-                    if (hasDownload && (href.startsWith('blob:') || href.startsWith('data:'))) {
-                        var filename = this.getAttribute('download') || 'download.pdf';
-                        saveBlobNative(href, filename);
-                        return;
+                    var href = this.href || this.getAttribute('href') || '';
+                    if (isDownloadTarget(this, href)) {
+                        var fn = getFilename(this, href);
+                        if (href.startsWith('blob:') || href.startsWith('data:') || href.toLowerCase().indexOf('.xlsx') !== -1 || href.toLowerCase().indexOf('.xls') !== -1 || href.toLowerCase().indexOf('.csv') !== -1) {
+                            saveBlobNative(href, fn);
+                            return;
+                        }
                     }
                     return origClick.apply(this, arguments);
+                };
+            } catch (e) {}
+
+            // 3. Intercept .dispatchEvent() (used by SheetJS / XLSX.js / FileSaver.js / TableExport)
+            try {
+                var origDispatch = HTMLAnchorElement.prototype.dispatchEvent;
+                HTMLAnchorElement.prototype.dispatchEvent = function(event) {
+                    if (event && (event.type === 'click' || (event.type && event.type.indexOf('click') !== -1))) {
+                        var href = this.href || this.getAttribute('href') || '';
+                        if (isDownloadTarget(this, href)) {
+                            var fn = getFilename(this, href);
+                            if (href.startsWith('blob:') || href.startsWith('data:') || href.toLowerCase().indexOf('.xlsx') !== -1 || href.toLowerCase().indexOf('.xls') !== -1 || href.toLowerCase().indexOf('.csv') !== -1) {
+                                saveBlobNative(href, fn);
+                                return true;
+                            }
+                        }
+                    }
+                    return origDispatch.apply(this, arguments);
+                };
+            } catch (e) {}
+
+            // 4. Hook navigator.msSaveOrOpenBlob & msSaveBlob (standard enterprise ERP fallbacks)
+            try {
+                window.navigator.msSaveOrOpenBlob = function(blob, filename) {
+                    var url = URL.createObjectURL(blob);
+                    saveBlobNative(url, filename || 'export.xlsx');
+                    return true;
+                };
+                window.navigator.msSaveBlob = window.navigator.msSaveOrOpenBlob;
+            } catch (e) {}
+
+            // 5. Hook window.saveAs (FileSaver.js global)
+            try {
+                window.saveAs = function(blob, filename) {
+                    if (blob instanceof Blob || (typeof blob === 'object' && blob && blob.size)) {
+                        var url = URL.createObjectURL(blob);
+                        saveBlobNative(url, filename || 'export.xlsx');
+                    } else if (typeof blob === 'string') {
+                        saveBlobNative(blob, filename || 'export.xlsx');
+                    }
+                };
+            } catch (e) {}
+
+            // 6. Hook window.open for direct Excel download links
+            try {
+                var origOpen = window.open;
+                window.open = function(url) {
+                    if (url && typeof url === 'string') {
+                        var lower = url.toLowerCase();
+                        if (lower.indexOf('.xlsx') !== -1 || lower.indexOf('.xls') !== -1 || lower.indexOf('.csv') !== -1) {
+                            saveBlobNative(url, '');
+                            return null;
+                        }
+                    }
+                    if (origOpen) return origOpen.apply(this, arguments);
+                    return null;
                 };
             } catch (e) {}
         }
