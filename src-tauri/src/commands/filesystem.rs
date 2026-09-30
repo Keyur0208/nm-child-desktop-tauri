@@ -89,29 +89,16 @@ pub async fn save_download_bytes(
         sanitized_filename.trim().to_string()
     };
 
-    // Auto-detect file format from magic bytes to guarantee Excel files are accurately named
-    let has_ext = std::path::Path::new(&clean_filename).extension().is_some();
-    if !has_ext || clean_filename.ends_with(".pdf") {
-        if bytes.starts_with(b"PK\x03\x04") {
-            // Modern Excel XLSX
-            clean_filename = if clean_filename.ends_with(".pdf") {
-                format!("{}.xlsx", &clean_filename[..clean_filename.len() - 4])
-            } else {
-                format!("{}.xlsx", clean_filename)
-            };
-        } else if bytes.starts_with(b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1") {
-            // Legacy Excel XLS (BIFF8)
-            clean_filename = if clean_filename.ends_with(".pdf") {
-                format!("{}.xls", &clean_filename[..clean_filename.len() - 4])
-            } else {
-                format!("{}.xls", clean_filename)
-            };
-        } else if bytes.starts_with(b"%PDF-") {
-            if !clean_filename.ends_with(".pdf") {
-                clean_filename = format!("{}.pdf", clean_filename);
-            }
-        } else if !has_ext {
-            clean_filename = format!("{}.xlsx", clean_filename);
+    // If filename has no extension, detect format from file magic bytes
+    if !clean_filename.contains('.') {
+        if bytes.starts_with(b"%PDF") {
+            clean_filename.push_str(".pdf");
+        } else if bytes.starts_with(&[0x50, 0x4B, 0x03, 0x04]) {
+            clean_filename.push_str(".xlsx");
+        } else if bytes.starts_with(&[0xD0, 0xCF, 0x11, 0xE0]) {
+            clean_filename.push_str(".xls");
+        } else {
+            clean_filename.push_str(".xlsx");
         }
     }
 
@@ -121,15 +108,17 @@ pub async fn save_download_bytes(
         .or_else(|_| app.path().home_dir().map(|h| h.join("Downloads")))
         .unwrap_or_else(|_| std::env::temp_dir());
 
-    if !download_dir.exists() {
-        let _ = std::fs::create_dir_all(&download_dir);
-    }
-
+    // On macOS, save directly to user's Downloads directory (matching WebKit on_download behavior)
+    // Avoids AppKit NSSavePanel deadlocks / worker thread assertions on macOS
     #[cfg(target_os = "macos")]
     {
+        if !download_dir.exists() {
+            let _ = fs::create_dir_all(&download_dir);
+        }
+
         let mut target = download_dir.join(&clean_filename);
         if target.exists() {
-            let stem = target.file_stem().and_then(|s| s.to_str()).unwrap_or("download");
+            let stem = target.file_stem().and_then(|s| s.to_str()).unwrap_or("export");
             let ext = target.extension().and_then(|e| e.to_str()).unwrap_or("");
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -147,7 +136,7 @@ pub async fn save_download_bytes(
             .map_err(|e| format!("Failed to save downloaded file: {}", e))?;
 
         crate::services::logging::log_info(&format!(
-            "[Download] macOS saved file directly to Downloads: {:?}",
+            "[Download] macOS successfully saved file directly to Downloads: {:?}",
             target
         ));
 

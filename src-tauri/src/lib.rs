@@ -104,8 +104,10 @@ pub fn run() {
                                     "export.xlsx".to_string()
                                 } else if u.contains("csv") {
                                     "export.csv".to_string()
-                                } else {
+                                } else if u.contains("pdf") {
                                     "download.pdf".to_string()
+                                } else {
+                                    "export.xlsx".to_string()
                                 }
                             });
 
@@ -322,15 +324,83 @@ fn get_client_enhancements_script() -> &'static str {
         // 3. Save Blob / Data URLs directly to Downloads via native Rust command
         function saveBlobNative(href, filename) {
             console.log('[Tauri Native] Intercepted download:', filename, href ? href.substring(0, 60) : '');
+
+            function dispatchSave(fn, rawBytes) {
+                var bytes = Array.isArray(rawBytes) ? rawBytes : Array.from(new Uint8Array(rawBytes));
+                var invokeFn = null;
+                if (window.__TAURI_INTERNALS__ && typeof window.__TAURI_INTERNALS__.invoke === 'function') {
+                    invokeFn = window.__TAURI_INTERNALS__.invoke;
+                } else if (window.__TAURI__ && window.__TAURI__.core && typeof window.__TAURI__.core.invoke === 'function') {
+                    invokeFn = window.__TAURI__.core.invoke;
+                }
+                if (invokeFn) {
+                    invokeFn('save_download_bytes', {
+                        filename: fn || 'export.xlsx',
+                        bytes: bytes
+                    }).then(function(savedPath) {
+                        if (savedPath === 'CANCELLED') {
+                            console.log('[Tauri Native] File download cancelled by user');
+                            return;
+                        }
+                        console.log('[Tauri Native] File downloaded and saved successfully:', savedPath);
+                        var baseName = savedPath ? (savedPath.split('/').pop().split('\\').pop() || fn) : fn;
+                        showDownloadToast('✓ Saved: ' + baseName, true);
+                    }).catch(function(err) {
+                        console.error('[Tauri Native] Failed to save file:', err);
+                        showDownloadToast('⚠ Failed to save: ' + (err || 'Unknown error'), false);
+                    });
+                }
+            }
+
+            // Direct base64 / data URL decoding (bypasses WebKit fetch restrictions on data: URLs)
+            if (href && href.startsWith('data:')) {
+                try {
+                    var commaIdx = href.indexOf(',');
+                    if (commaIdx !== -1) {
+                        var meta = href.substring(0, commaIdx);
+                        var raw = href.substring(commaIdx + 1);
+                        var decodedBytes;
+                        if (meta.indexOf(';base64') !== -1) {
+                            var binary = atob(raw);
+                            decodedBytes = new Uint8Array(binary.length);
+                            for (var i = 0; i < binary.length; i++) {
+                                decodedBytes[i] = binary.charCodeAt(i);
+                            }
+                        } else {
+                            var decodedStr = decodeURIComponent(raw);
+                            decodedBytes = new Uint8Array(decodedStr.length);
+                            for (var j = 0; j < decodedStr.length; j++) {
+                                decodedBytes[j] = decodedStr.charCodeAt(j);
+                            }
+                        }
+                        if (!filename || filename === 'download.pdf' || filename.indexOf('.') === -1) {
+                            if (meta.indexOf('spreadsheetml') !== -1 || meta.indexOf('excel') !== -1) {
+                                filename = 'export.xlsx';
+                            } else if (meta.indexOf('csv') !== -1) {
+                                filename = 'export.csv';
+                            } else if (meta.indexOf('pdf') !== -1) {
+                                filename = 'download.pdf';
+                            } else if (!filename) {
+                                filename = 'export.xlsx';
+                            }
+                        }
+                        dispatchSave(filename, decodedBytes);
+                        return;
+                    }
+                } catch (dataErr) {
+                    console.error('[Tauri Native] Error decoding data URL:', dataErr);
+                }
+            }
+
             fetch(href)
                 .then(function(res) {
                     // Try getting filename from header if not provided
-                    if (!filename || filename === 'download.pdf') {
+                    if (!filename || filename === 'download.pdf' || filename.indexOf('.') === -1) {
                         var cd = res.headers.get('content-disposition');
-                        if (cd && cd.indexOf('filename=') !== -1) {
-                            var match = cd.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
+                        if (cd && cd.indexOf('filename') !== -1) {
+                            var match = cd.match(/filename\*?=['"]?(?:UTF-\d['"]*)?([^;\r\n"']*)['"]?/i);
                             if (match && match[1]) {
-                                filename = match[1].replace(/['"]/g, '').trim();
+                                filename = decodeURIComponent(match[1].trim());
                             }
                         }
                     }
@@ -340,37 +410,22 @@ fn get_client_enhancements_script() -> &'static str {
                             filename = 'export.xlsx';
                         } else if (ct.indexOf('csv') !== -1) {
                             filename = 'export.csv';
+                        } else if (ct.indexOf('pdf') !== -1) {
+                            filename = 'download.pdf';
                         }
                     }
-                    if (!filename) filename = 'export.xlsx';
+                    if (!filename || filename === 'download.pdf') {
+                        var lower = (href || '').toLowerCase();
+                        if (lower.indexOf('.xlsx') !== -1) filename = 'export.xlsx';
+                        else if (lower.indexOf('.xls') !== -1) filename = 'export.xls';
+                        else if (lower.indexOf('.csv') !== -1) filename = 'export.csv';
+                        else if (!filename) filename = 'export.xlsx';
+                    }
 
                     return res.arrayBuffer();
                 })
                 .then(function(buffer) {
-                    var bytes = Array.from(new Uint8Array(buffer));
-                    var invokeFn = null;
-                    if (window.__TAURI_INTERNALS__ && typeof window.__TAURI_INTERNALS__.invoke === 'function') {
-                        invokeFn = window.__TAURI_INTERNALS__.invoke;
-                    } else if (window.__TAURI__ && window.__TAURI__.core && typeof window.__TAURI__.core.invoke === 'function') {
-                        invokeFn = window.__TAURI__.core.invoke;
-                    }
-                    if (invokeFn) {
-                        invokeFn('save_download_bytes', {
-                            filename: filename,
-                            bytes: bytes
-                        }).then(function(savedPath) {
-                            if (savedPath === 'CANCELLED') {
-                                console.log('[Tauri Native] File download cancelled by user');
-                                return;
-                            }
-                            console.log('[Tauri Native] File downloaded and saved successfully:', savedPath);
-                            var baseName = savedPath ? (savedPath.split('/').pop().split('\\').pop() || filename) : filename;
-                            showDownloadToast('✓ Saved: ' + baseName, true);
-                        }).catch(function(err) {
-                            console.error('[Tauri Native] Failed to save file:', err);
-                            showDownloadToast('⚠ Failed to save: ' + (err || 'Unknown error'), false);
-                        });
-                    }
+                    dispatchSave(filename, buffer);
                 })
                 .catch(function(err) {
                     console.error('[Tauri Native] Failed to fetch blob for download:', err);
@@ -384,15 +439,18 @@ fn get_client_enhancements_script() -> &'static str {
             window.__nm_download_interceptor_set__ = true;
 
             function isDownloadTarget(el, href) {
-                var hasDownload = el.hasAttribute('download') || (typeof el.download === 'string' && el.download.length > 0);
-                var isBlobOrData = href.startsWith('blob:') || href.startsWith('data:');
-                var lowerHref = href.toLowerCase();
-                var isExcelFile = lowerHref.indexOf('.xlsx') !== -1 || lowerHref.indexOf('.xls') !== -1 || lowerHref.indexOf('.csv') !== -1;
-                return (hasDownload || isBlobOrData || isExcelFile);
+                if (!el && !href) return false;
+                var hasDownload = el && (el.hasAttribute('download') || (typeof el.download === 'string' && el.download.length > 0));
+                var lowerHref = (href || '').toLowerCase();
+                var isBlobOrData = lowerHref.startsWith('blob:') || lowerHref.startsWith('data:');
+                var fn = el ? (el.download || el.getAttribute('download') || '').toLowerCase() : '';
+                var isExcelOrDoc = lowerHref.indexOf('.xlsx') !== -1 || lowerHref.indexOf('.xls') !== -1 || lowerHref.indexOf('.csv') !== -1 ||
+                                   fn.indexOf('.xlsx') !== -1 || fn.indexOf('.xls') !== -1 || fn.indexOf('.csv') !== -1;
+                return (hasDownload || isBlobOrData || isExcelOrDoc);
             }
 
             function getFilename(el, href) {
-                var fn = el.download || el.getAttribute('download') || '';
+                var fn = (el && (el.download || el.getAttribute('download'))) || '';
                 if (!fn && href) {
                     try {
                         var parts = href.split('/');
@@ -414,11 +472,9 @@ fn get_client_enhancements_script() -> &'static str {
                 var href = el.href || el.getAttribute('href') || '';
                 if (isDownloadTarget(el, href)) {
                     var fn = getFilename(el, href);
-                    if (href.startsWith('blob:') || href.startsWith('data:') || href.toLowerCase().indexOf('.xlsx') !== -1 || href.toLowerCase().indexOf('.xls') !== -1 || href.toLowerCase().indexOf('.csv') !== -1) {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        saveBlobNative(href, fn);
-                    }
+                    e.preventDefault();
+                    e.stopPropagation();
+                    saveBlobNative(href, fn);
                 }
             }, true);
 
@@ -429,10 +485,8 @@ fn get_client_enhancements_script() -> &'static str {
                     var href = this.href || this.getAttribute('href') || '';
                     if (isDownloadTarget(this, href)) {
                         var fn = getFilename(this, href);
-                        if (href.startsWith('blob:') || href.startsWith('data:') || href.toLowerCase().indexOf('.xlsx') !== -1 || href.toLowerCase().indexOf('.xls') !== -1 || href.toLowerCase().indexOf('.csv') !== -1) {
-                            saveBlobNative(href, fn);
-                            return;
-                        }
+                        saveBlobNative(href, fn);
+                        return;
                     }
                     return origClick.apply(this, arguments);
                 };
@@ -446,10 +500,8 @@ fn get_client_enhancements_script() -> &'static str {
                         var href = this.href || this.getAttribute('href') || '';
                         if (isDownloadTarget(this, href)) {
                             var fn = getFilename(this, href);
-                            if (href.startsWith('blob:') || href.startsWith('data:') || href.toLowerCase().indexOf('.xlsx') !== -1 || href.toLowerCase().indexOf('.xls') !== -1 || href.toLowerCase().indexOf('.csv') !== -1) {
-                                saveBlobNative(href, fn);
-                                return true;
-                            }
+                            saveBlobNative(href, fn);
+                            return true;
                         }
                     }
                     return origDispatch.apply(this, arguments);
@@ -484,7 +536,7 @@ fn get_client_enhancements_script() -> &'static str {
                 window.open = function(url) {
                     if (url && typeof url === 'string') {
                         var lower = url.toLowerCase();
-                        if (lower.indexOf('.xlsx') !== -1 || lower.indexOf('.xls') !== -1 || lower.indexOf('.csv') !== -1) {
+                        if (lower.indexOf('.xlsx') !== -1 || lower.indexOf('.xls') !== -1 || lower.indexOf('.csv') !== -1 || lower.startsWith('blob:') || lower.startsWith('data:')) {
                             saveBlobNative(url, '');
                             return null;
                         }
