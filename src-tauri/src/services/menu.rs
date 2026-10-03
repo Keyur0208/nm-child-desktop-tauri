@@ -44,11 +44,20 @@ pub fn create_app_menu(app: &AppHandle) -> Result<Menu<Wry>, tauri::Error> {
         .item(&PredefinedMenuItem::select_all(app, None)?)
         .build()?;
 
+    let is_devtools = crate::config::get_config().is_devtools_enabled();
+
     // 3. View Menu (Reload and Zoom controls)
-    let view_menu = SubmenuBuilder::new(app, "View")
+    let mut view_menu_builder = SubmenuBuilder::new(app, "View")
         .item(&MenuItemBuilder::with_id("reload", "Reload").accelerator("CmdOrCtrl+R").build(app)?)
         .item(&MenuItemBuilder::with_id("force_reload", "Force Reload").accelerator("CmdOrCtrl+Shift+R").build(app)?)
-        .item(&MenuItemBuilder::with_id("toggle_devtools", "Toggle Developer Tools").accelerator("CmdOrCtrl+Shift+I").build(app)?)
+        .item(&MenuItemBuilder::with_id("clear_cache", "Clear Cache & Reload").build(app)?);
+
+    if is_devtools {
+        view_menu_builder = view_menu_builder
+            .item(&MenuItemBuilder::with_id("toggle_devtools", "Toggle Developer Tools").accelerator("CmdOrCtrl+Shift+I").build(app)?);
+    }
+
+    let view_menu = view_menu_builder
         .separator()
         .item(&MenuItemBuilder::with_id("zoom_reset", "Actual Size").accelerator("CmdOrCtrl+0").build(app)?)
         .item(&MenuItemBuilder::with_id("zoom_in", "Zoom In").accelerator("CmdOrCtrl+Plus").build(app)?)
@@ -116,11 +125,19 @@ pub fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
             crate::services::zoom::apply_current_zoom(&main_win);
             let _ = main_win.eval("window.location.reload(true);");
         }
+        "clear_cache" => {
+            crate::services::cleaner::clean_browser_disk_cache(app);
+            crate::services::diagnostics::soft_reload_page(&main_win, "User requested manual Clear Cache & Reload from menu");
+        }
         "toggle_devtools" => {
-            if main_win.is_devtools_open() {
-                main_win.close_devtools();
+            if crate::config::get_config().is_devtools_enabled() {
+                if main_win.is_devtools_open() {
+                    main_win.close_devtools();
+                } else {
+                    main_win.open_devtools();
+                }
             } else {
-                main_win.open_devtools();
+                crate::services::logging::log_info("[Menu] DevTools are disabled in current environment");
             }
         }
         "zoom_in" => {

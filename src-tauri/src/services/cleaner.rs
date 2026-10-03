@@ -60,17 +60,68 @@ pub fn clean_old_logs(app: &AppHandle) {
     ));
 }
 
+/// Safely cleans WebView HTTP disk cache and code cache files older than 7 days
+/// WITHOUT touching cookies, localStorage, or user sessions.
+pub fn clean_browser_disk_cache(app: &AppHandle) {
+    let base_dir = match app.path().app_data_dir() {
+        Ok(dir) => dir,
+        Err(_) => return,
+    };
+
+    // Candidate cache directories under WebView profile (e.g. EBWebView/Default/Cache, EBWebView/Default/Code Cache)
+    let cache_dirs = [
+        base_dir.join("EBWebView").join("Default").join("Cache"),
+        base_dir.join("EBWebView").join("Default").join("Code Cache"),
+        base_dir.join("EBWebView").join("Default").join("GPUCache"),
+    ];
+
+    let now = SystemTime::now();
+    let max_age = Duration::from_secs(7 * SECONDS_PER_DAY); // 7-day-old cache cleanup
+    let mut cleaned_files = 0;
+
+    for dir in &cache_dirs {
+        if !dir.exists() {
+            continue;
+        }
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    if let Ok(meta) = entry.metadata() {
+                        if let Ok(mod_time) = meta.modified() {
+                            if let Ok(age) = now.duration_since(mod_time) {
+                                if age > max_age && fs::remove_file(&path).is_ok() {
+                                    cleaned_files += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if cleaned_files > 0 {
+        crate::services::logging::log_info(&format!(
+            "[Cleaner] Cleaned {} stale browser cache files older than 7 days",
+            cleaned_files
+        ));
+    }
+}
+
 pub fn start_log_cleaner(app: AppHandle) {
     thread::spawn(move || {
         // Initial run on startup
         clean_old_logs(&app);
+        clean_browser_disk_cache(&app);
 
         // Periodic run every 24 hours
         loop {
             thread::sleep(Duration::from_secs(SECONDS_PER_DAY));
             clean_old_logs(&app);
+            clean_browser_disk_cache(&app);
         }
     });
 
-    crate::services::logging::log_info("[LogCleaner] Daily log cleanup background timer scheduled");
+    crate::services::logging::log_info("[LogCleaner] Daily log and browser cache cleanup background timer scheduled");
 }

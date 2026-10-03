@@ -20,10 +20,14 @@ export const ASSETS = {
 // ---------------------------------------------------------------------------
 // SERVER  —  hospital local ERP server endpoints
 // ---------------------------------------------------------------------------
+const env =
+    typeof import.meta !== 'undefined' && import.meta.env
+        ? (import.meta.env as Record<string, string | undefined>)
+        : {};
+const configuredServerUrl = env.VITE_API_URL || 'http://localhost:8081';
+
 export const SERVER = {
-    port: 8081,
-    localUrl: 'http://192.168.1.140:8081',
-    serverlUrl: 'http://192.168.1.140:8081',
+    localUrl: configuredServerUrl,
 } as const;
 
 // ---------------------------------------------------------------------------

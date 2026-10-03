@@ -125,13 +125,30 @@ pub fn trim_memory_now() -> (u64, u64) {
 }
 
 /// Soft Reloads the web page without killing the .exe, while preserving login session and route URL.
+/// Also purges CacheStorage, Performance Resource Timings, and DevTools console protocol cache.
 pub fn soft_reload_page(window: &tauri::WebviewWindow, reason: &str) {
-    crate::services::logging::log_warn(&format!("[Watchdog] Executing Soft Refresh: {}", reason));
+    crate::services::logging::log_warn(&format!("[Watchdog] Executing Soft Refresh & Cache Eviction: {}", reason));
     let script = r#"
         try {
-            if (window.location && window.location.href && !window.location.href.includes('tauri://') && !window.location.href.includes('localhost:5173')) {
+            // 1. Preserve active route URL so user returns to the exact same screen
+            if (window.location && window.location.href && !window.location.href.includes('tauri://') && !window.location.href.includes('localhost:8081')) {
                 localStorage.setItem('__nm_last_active_url', window.location.href);
             }
+            // 2. Clear browser in-memory CacheStorage
+            if (window.caches && caches.keys) {
+                caches.keys().then(function(keys) {
+                    keys.forEach(function(k) { caches.delete(k); });
+                });
+            }
+            // 3. Clear Performance Resource Timings to free heap references
+            if (window.performance && window.performance.clearResourceTimings) {
+                window.performance.clearResourceTimings();
+            }
+            // 4. Auto-cleanup DevTools protocol & console cache
+            if (window.console && typeof console.clear === 'function') {
+                console.clear();
+            }
+            // 5. Fresh reload
             window.location.reload();
         } catch(e) {
             window.location.reload();
@@ -237,6 +254,7 @@ pub fn start_memory_watchdog(app: AppHandle) {
 
                 if !already_restarted_today && has_minimum_uptime {
                     set_last_restart_date(&app, &today_str);
+                    crate::services::cleaner::clean_browser_disk_cache(&app);
                     if let Some(window) = app.get_webview_window("main") {
                         soft_reload_page(&window, &format!("Scheduled nightly 3 AM refresh while system idle for {} min", idle_min));
                         trim_process_tree_memory(&pids);
@@ -266,7 +284,7 @@ fn restart_app(app: &AppHandle, reason: &str) {
         crate::services::logging::log_info("[Watchdog] Preserving active route and session state before restart...");
         let save_script = r#"
             try {
-                if (window.location && window.location.href && !window.location.href.includes('tauri://') && !window.location.href.includes('localhost:5173')) {
+                if (window.location && window.location.href && !window.location.href.includes('tauri://') && !window.location.href.includes('localhost:8081')) {
                     localStorage.setItem('__nm_last_active_url', window.location.href);
                 }
             } catch(e) {}

@@ -11,10 +11,12 @@ name = "nilkanth_medico_homs_child_lib"
 crate-type = ["lib"]
 
 [build-dependencies]
+dotenvy = "0.15"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = ["devtools"] }
+dotenvy = "0.15"
 tauri-plugin-single-instance = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"

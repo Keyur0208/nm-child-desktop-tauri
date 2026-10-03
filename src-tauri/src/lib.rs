@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod config;
 pub mod services;
 pub mod utils;
 
@@ -44,10 +45,17 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle().clone();
 
+            // Resolve environment config
+            let env_config = config::get_config();
+
             // Initialize daily logging system
             services::logging::init_logger(&handle);
             services::logging::log_info("============================================================");
             services::logging::log_info("[App] Nilkanth Medico Hospital ERP Child — STARTING (Tauri 2.x)");
+            services::logging::log_info(&format!("[App] Environment: {}", env_config.app_env.as_str()));
+            services::logging::log_info(&format!("[App] API URL: {}", env_config.api_url));
+            services::logging::log_info(&format!("[App] Log Level: {}", env_config.log_level));
+            services::logging::log_info(&format!("[App] DevTools Enabled: {}", env_config.is_devtools_enabled()));
             services::logging::log_info(&format!("[App] OS PID: {}", std::process::id()));
             services::logging::log_info("============================================================");
 
@@ -68,7 +76,22 @@ pub fn run() {
             let sys_script = commands::system::generate_injection_script(&sys_info);
             let zoom_script = services::zoom::get_zoom_init_script();
             let client_enhancements = get_client_enhancements_script();
-            let init_script = format!("{}\n{}\n{}", sys_script, zoom_script, client_enhancements);
+            let devtools_enabled = env_config.is_devtools_enabled();
+            let devtools_protect_script = if !devtools_enabled {
+                get_devtools_protection_script()
+            } else {
+                ""
+            };
+            let console_limiter_script = if env_config.is_prod() {
+                get_console_limiter_script()
+            } else {
+                ""
+            };
+            let network_limiter_script = get_network_limiter_script();
+            let init_script = format!(
+                "{}\n{}\n{}\n{}\n{}\n{}",
+                sys_script, zoom_script, client_enhancements, devtools_protect_script, console_limiter_script, network_limiter_script
+            );
             services::logging::log_info("[App] Initializing main window with native resourceInfo, zoom, and download enhancement scripts");
 
             let window = WebviewWindowBuilder::new(
@@ -83,6 +106,7 @@ pub fn run() {
             .maximized(true)
             .fullscreen(false)
             .decorations(true)
+            .devtools(devtools_enabled)
             .additional_browser_args("--enable-gpu-rasterization --enable-zero-copy --ignore-gpu-blocklist --disable-renderer-backgrounding --disk-cache-size=268435456 --js-flags=--max-old-space-size=4096")
             .initialization_script(&init_script)
             .on_download(|webview, event| {
@@ -255,6 +279,7 @@ pub fn run() {
             commands::window::restore_window,
             commands::window::reload_window,
             commands::window::trim_memory,
+            config::environment::get_environment_info,
             services::logging::log_diagnostic,
             services::logging::log_auth_event,
             services::zoom::get_zoom_level,
@@ -560,6 +585,219 @@ fn get_client_enhancements_script() -> &'static str {
             injectPrintStyles();
             setupBlobDownloadInterceptor();
         });
+    })();
+    "#
+}
+
+/// Injected script when DevTools are disabled in production to block shortcut keys and context menu inspection
+fn get_devtools_protection_script() -> &'static str {
+    r#"
+    (function() {
+        window.addEventListener('keydown', function(e) {
+            var isCtrlOrMeta = e.ctrlKey || e.metaKey;
+            var key = e.key ? e.key.toUpperCase() : '';
+            var keyCode = e.keyCode || e.which;
+
+            // Block F12
+            if (key === 'F12' || keyCode === 123) {
+                e.preventDefault();
+                e.stopPropagation();
+                return false;
+            }
+
+            // Block Ctrl/Cmd + Shift + I/J/C
+            if (isCtrlOrMeta && e.shiftKey && (key === 'I' || key === 'J' || key === 'C' || keyCode === 73 || keyCode === 74 || keyCode === 67)) {
+                e.preventDefault();
+                e.stopPropagation();
+                return false;
+            }
+
+            // Block Ctrl/Cmd + U
+            if (isCtrlOrMeta && (key === 'U' || keyCode === 85)) {
+                e.preventDefault();
+                e.stopPropagation();
+                return false;
+            }
+        }, true);
+
+        // Block inspect context menu on non-editable elements
+        document.addEventListener('contextmenu', function(e) {
+            var el = e.target;
+            var tag = el ? (el.tagName || '').toUpperCase() : '';
+            var isEditable = el && (el.isContentEditable || tag === 'INPUT' || tag === 'TEXTAREA');
+            if (!isEditable) {
+                e.preventDefault();
+                e.stopPropagation();
+                return false;
+            }
+        }, true);
+    })();
+    "#
+}
+
+/// Script injected into the WebView in production to mute console.log/debug/info
+/// and keep a bounded circular buffer of the latest 100 console.warn and console.error entries.
+fn get_console_limiter_script() -> &'static str {
+    r#"
+    (function() {
+        var MAX_ENTRIES = 100;
+        var logBuffer = [];
+
+        // In Production: Disable high-frequency log spam to prevent memory leaks
+        console.log = function() {};
+        console.debug = function() {};
+        console.info = function() {};
+
+        function recordLog(level, args) {
+            try {
+                var parts = [];
+                for (var i = 0; i < args.length; i++) {
+                    var item = args[i];
+                    if (typeof item === 'object' && item !== null) {
+                        try {
+                            parts.push(JSON.stringify(item));
+                        } catch (e) {
+                            parts.push(String(item));
+                        }
+                    } else {
+                        parts.push(String(item));
+                    }
+                }
+                var message = parts.join(' ');
+
+                // Keep only latest 100 entries (FIFO circular buffer)
+                if (logBuffer.length >= MAX_ENTRIES) {
+                    logBuffer.shift();
+                }
+
+                logBuffer.push({
+                    timestamp: new Date().toISOString(),
+                    level: level,
+                    message: message
+                });
+            } catch (err) {}
+        }
+
+        var origWarn = console.warn ? console.warn.bind(console) : function() {};
+        var origError = console.error ? console.error.bind(console) : function() {};
+
+        console.warn = function() {
+            recordLog('WARN', arguments);
+            origWarn.apply(console, arguments);
+        };
+
+        console.error = function() {
+            recordLog('ERROR', arguments);
+            origError.apply(console, arguments);
+        };
+
+        // Window-level diagnostic helper for support or error reporting
+        window.__getLatestLogs__ = function() {
+            return logBuffer.slice();
+        };
+    })();
+    "#
+}
+
+/// Script injected into the WebView to maintain a bounded circular ring buffer
+/// of the latest 500 network requests (fetch and XMLHttpRequest) with zero memory leaks.
+fn get_network_limiter_script() -> &'static str {
+    r#"
+    (function() {
+        var MAX_NETWORK_ENTRIES = 500;
+        var networkBuffer = [];
+
+        function addNetworkLog(entry) {
+            try {
+                if (networkBuffer.length >= MAX_NETWORK_ENTRIES) {
+                    networkBuffer.shift(); // Evict oldest request (FIFO)
+                }
+                networkBuffer.push(entry);
+            } catch (e) {}
+        }
+
+        // 1. Hook window.fetch
+        if (typeof window !== 'undefined' && window.fetch) {
+            var origFetch = window.fetch;
+            window.fetch = function() {
+                var start = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+                var url = '';
+                var method = 'GET';
+
+                try {
+                    var arg0 = arguments[0];
+                    if (typeof arg0 === 'string') {
+                        url = arg0;
+                    } else if (arg0 && typeof arg0 === 'object' && arg0.url) {
+                        url = arg0.url;
+                    }
+                    if (arguments[1] && arguments[1].method) {
+                        method = String(arguments[1].method).toUpperCase();
+                    }
+                } catch (e) {}
+
+                return origFetch.apply(this, arguments).then(function(res) {
+                    var end = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+                    addNetworkLog({
+                        time: new Date().toISOString(),
+                        type: 'fetch',
+                        method: method,
+                        url: url,
+                        status: res ? res.status : 200,
+                        durationMs: Math.round(end - start)
+                    });
+                    return res;
+                }).catch(function(err) {
+                    var end = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+                    addNetworkLog({
+                        time: new Date().toISOString(),
+                        type: 'fetch',
+                        method: method,
+                        url: url,
+                        status: 0,
+                        error: err ? (err.message || String(err)) : 'Network Error',
+                        durationMs: Math.round(end - start)
+                    });
+                    throw err;
+                });
+            };
+        }
+
+        // 2. Hook XMLHttpRequest
+        if (typeof window !== 'undefined' && window.XMLHttpRequest) {
+            var origOpen = XMLHttpRequest.prototype.open;
+            var origSend = XMLHttpRequest.prototype.send;
+
+            XMLHttpRequest.prototype.open = function(method, url) {
+                this._nm_method = method ? String(method).toUpperCase() : 'GET';
+                this._nm_url = url ? String(url) : '';
+                return origOpen.apply(this, arguments);
+            };
+
+            XMLHttpRequest.prototype.send = function() {
+                var self = this;
+                var start = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+
+                self.addEventListener('loadend', function() {
+                    var end = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+                    addNetworkLog({
+                        time: new Date().toISOString(),
+                        type: 'xhr',
+                        method: self._nm_method || 'GET',
+                        url: self._nm_url || '',
+                        status: typeof self.status === 'number' ? self.status : 0,
+                        durationMs: Math.round(end - start)
+                    });
+                });
+
+                return origSend.apply(this, arguments);
+            };
+        }
+
+        // Diagnostic accessor accessible to window or console
+        window.__getLatestNetworkLogs__ = function() {
+            return networkBuffer.slice();
+        };
     })();
     "#
 }

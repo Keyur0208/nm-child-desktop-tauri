@@ -30,9 +30,11 @@ Thumbs.db
 *.sublime-workspace
 *.sublime-project
 
-# Environment variables
+# environment variables
 .env
-.env.*.local
+.env.local
+.env.development
+.env.production
 
 # Build directories
 build/

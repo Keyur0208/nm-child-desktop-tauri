@@ -29,7 +29,30 @@ fn get_current_log_file() -> Option<PathBuf> {
     }
 }
 
+fn should_log(level: &str) -> bool {
+    let configured = crate::config::get_config().log_level.to_lowercase();
+    let current_rank = match level.to_uppercase().as_str() {
+        "DEBUG" => 1,
+        "INFO" => 2,
+        "WARN" => 3,
+        "ERROR" => 4,
+        _ => 2,
+    };
+    let threshold_rank = match configured.as_str() {
+        "debug" => 1,
+        "info" => 2,
+        "warn" | "warning" => 3,
+        "error" => 4,
+        _ => 2,
+    };
+    current_rank >= threshold_rank
+}
+
 fn write_log(level: &str, text: &str) {
+    if !should_log(level) {
+        return;
+    }
+
     let now_kolkata = Utc::now().with_timezone(&Kolkata);
     let timestamp = now_kolkata.format("%d-%m-%Y %H:%M:%S%.3f").to_string();
     let line = format!("[{}] [{}] {}\n", timestamp, level, text);
@@ -41,6 +64,10 @@ fn write_log(level: &str, text: &str) {
             let _ = file.write_all(line.as_bytes());
         }
     }
+}
+
+pub fn log_debug(text: &str) {
+    write_log("DEBUG", text);
 }
 
 pub fn log_info(text: &str) {
@@ -68,6 +95,7 @@ pub struct AuthLogDetails {
 #[tauri::command]
 pub async fn log_diagnostic(level: String, message: String) -> Result<(), String> {
     match level.to_uppercase().as_str() {
+        "DEBUG" => log_debug(&message),
         "ERROR" => log_error(&message),
         "WARN" => log_warn(&message),
         _ => log_info(&message),

@@ -3,10 +3,10 @@ import { defineConfig } from 'vite';
 export default defineConfig({
     clearScreen: false,
     server: {
-        port: 5173,
+        port: 8081,
         strictPort: true,
     },
-    envPrefix: ['VITE_', 'TAURI_'],
+    envPrefix: ['VITE_', 'TAURI_', 'APP_', 'API_', 'LOG_'],
     build: {
         target: 'chrome105',
         minify: 'esbuild',
