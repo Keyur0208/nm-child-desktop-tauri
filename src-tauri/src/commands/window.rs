@@ -73,12 +73,18 @@ pub async fn reload_window(window: WebviewWindow) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn trim_memory() -> Result<u64, String> {
+pub async fn trim_memory(window: WebviewWindow) -> Result<serde_json::Value, String> {
     let (before, after) = crate::services::diagnostics::trim_memory_now();
+    crate::services::diagnostics::purge_webview_cache_and_timings(&window);
+    let freed = before.saturating_sub(after);
     crate::services::logging::log_info(&format!(
-        "[Window] User / Banner initiated memory trim: {} MB -> {} MB",
-        before, after
+        "[Window] Memory trim executed: {} MB -> {} MB (Freed: {} MB)",
+        before, after, freed
     ));
-    Ok(after)
+    Ok(serde_json::json!({
+        "beforeMb": before,
+        "afterMb": after,
+        "freedMb": freed
+    }))
 }
 

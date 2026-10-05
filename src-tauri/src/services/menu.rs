@@ -50,7 +50,8 @@ pub fn create_app_menu(app: &AppHandle) -> Result<Menu<Wry>, tauri::Error> {
     let mut view_menu_builder = SubmenuBuilder::new(app, "View")
         .item(&MenuItemBuilder::with_id("reload", "Reload").accelerator("CmdOrCtrl+R").build(app)?)
         .item(&MenuItemBuilder::with_id("force_reload", "Force Reload").accelerator("CmdOrCtrl+Shift+R").build(app)?)
-        .item(&MenuItemBuilder::with_id("clear_cache", "Clear Cache & Reload").build(app)?);
+        .item(&MenuItemBuilder::with_id("clear_cache", "Clear Cache & Reload").build(app)?)
+        .item(&MenuItemBuilder::with_id("trim_memory", "Optimize Memory (Release RAM)").accelerator("CmdOrCtrl+Alt+M").build(app)?);
 
     if is_devtools {
         view_menu_builder = view_menu_builder
@@ -128,6 +129,14 @@ pub fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
         "clear_cache" => {
             crate::services::cleaner::clean_browser_disk_cache(app);
             crate::services::diagnostics::soft_reload_page(&main_win, "User requested manual Clear Cache & Reload from menu");
+        }
+        "trim_memory" => {
+            let (before_mb, after_mb) = crate::services::diagnostics::trim_memory_now();
+            crate::services::diagnostics::purge_webview_cache_and_timings(&main_win);
+            crate::services::logging::log_info(&format!(
+                "[Menu] Manual memory optimization executed: {} MB -> {} MB across processes",
+                before_mb, after_mb
+            ));
         }
         "toggle_devtools" => {
             if crate::config::get_config().is_devtools_enabled() {

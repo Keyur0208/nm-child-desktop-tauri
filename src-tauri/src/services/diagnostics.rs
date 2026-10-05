@@ -9,11 +9,11 @@ use tauri::{AppHandle, Manager};
 
 const RELAUNCH_START_HOUR: u32 = 3;
 const RELAUNCH_END_HOUR: u32 = 4;
-const TRIM_MEMORY_THRESHOLD_MB: u64 = 800;    // Auto-trim RAM cache silently at 800 MB without any popup or restart
-const IDLE_TRIM_THRESHOLD_MB: u64 = 500;       // Auto-trim RAM cache silently when user is briefly idle (>= 1 min)
-const SOFT_RELOAD_IDLE_MB: u64 = 2200;         // Soft reload page if user is idle and RAM >= 2200 MB
+const PERIODIC_TRIM_MINUTES: u64 = 30;         // Auto-trim RAM and DevTools cache every 30 minutes unconditionally
+const CRITICAL_SYSTEM_FREE_RAM_MB: u64 = 500;  // Auto-trim if host PC has less than 500 MB free RAM
 const HARD_RESTART_CRITICAL_MB: u64 = 3500;    // Only full process restart if memory exceeds 3500 MB while idle
 const IDLE_MINUTES_THRESHOLD: u64 = 15;
+const MICRO_IDLE_SECONDS_THRESHOLD: u64 = 90;  // 90s micro-gap for 24x7 hospital staff (between patient visits)
 const CHECK_INTERVAL_SECS: u64 = 60;
 const MIN_UPTIME_BEFORE_NIGHTLY_RESTART_SECS: u64 = 1800; // Require at least 30 min uptime before scheduled restart
 
@@ -159,6 +159,57 @@ pub fn soft_reload_page(window: &tauri::WebviewWindow, reason: &str) {
 
 
 
+/// Calculates dynamic RAM trim threshold based on host machine's total RAM.
+/// - Low-end PC (<= 4 GB RAM): 350 MB threshold (keeps low-spec PCs snappy, avoids Windows pagefile thrashing)
+/// - Mid-range PC (<= 8 GB RAM): 600 MB threshold (standard OPD/clinic PCs)
+/// - High-end PC (> 8 GB RAM): 850 MB threshold (radiology/server workstations)
+pub fn get_dynamic_ram_threshold_mb(total_system_ram_mb: u64) -> u64 {
+    if total_system_ram_mb <= 4096 {
+        350
+    } else if total_system_ram_mb <= 8192 {
+        600
+    } else {
+        850
+    }
+}
+
+/// Calculates dynamic idle trim threshold based on host machine's total RAM.
+pub fn get_dynamic_idle_trim_threshold_mb(total_system_ram_mb: u64) -> u64 {
+    if total_system_ram_mb <= 4096 {
+        250
+    } else if total_system_ram_mb <= 8192 {
+        400
+    } else {
+        550
+    }
+}
+
+/// Calculates dynamic soft reload threshold (used ONLY when user is idle for 15+ min).
+pub fn get_dynamic_soft_reload_threshold_mb(total_system_ram_mb: u64) -> u64 {
+    if total_system_ram_mb <= 4096 {
+        1200
+    } else if total_system_ram_mb <= 8192 {
+        2000
+    } else {
+        2800
+    }
+}
+
+/// Silently purges DevTools console buffer and Performance Resource Timings in WebView without page reload or flicker.
+pub fn purge_webview_cache_and_timings(window: &tauri::WebviewWindow) {
+    let script = r#"
+        try {
+            if (window.performance && window.performance.clearResourceTimings) {
+                window.performance.clearResourceTimings();
+            }
+            if (window.console && typeof console.clear === 'function') {
+                console.clear();
+            }
+        } catch(e) {}
+    "#;
+    let _ = window.eval(script);
+}
+
 fn get_last_restart_file(app: &AppHandle) -> Option<std::path::PathBuf> {
     app.path().app_data_dir().ok().map(|p| p.join("last_nightly_restart.txt"))
 }
@@ -184,9 +235,15 @@ pub fn start_memory_watchdog(app: AppHandle) {
         let start_time = Instant::now();
         let mut loop_counter: u64 = 0;
 
+        sys.refresh_all();
+        let total_system_ram_mb = sys.total_memory() / (1024 * 1024);
+        let dynamic_trim_threshold_mb = get_dynamic_ram_threshold_mb(total_system_ram_mb);
+        let dynamic_idle_trim_mb = get_dynamic_idle_trim_threshold_mb(total_system_ram_mb);
+        let dynamic_soft_reload_mb = get_dynamic_soft_reload_threshold_mb(total_system_ram_mb);
+
         crate::services::logging::log_info(&format!(
-            "[Watchdog] 24x7 Silent Memory Watchdog active | Auto-Trim: {} MB (Idle: {} MB) | Soft Reload (Idle 15m): {} MB",
-            TRIM_MEMORY_THRESHOLD_MB, IDLE_TRIM_THRESHOLD_MB, SOFT_RELOAD_IDLE_MB
+            "[Watchdog] 24x7 Dynamic Adaptive Watchdog active | Host PC RAM: {} MB | Trim Threshold: {} MB | Interval: {}m | Soft Reload (Idle 15m): {} MB",
+            total_system_ram_mb, dynamic_trim_threshold_mb, PERIODIC_TRIM_MINUTES, dynamic_soft_reload_mb
         ));
 
         loop {
@@ -200,6 +257,7 @@ pub fn start_memory_watchdog(app: AppHandle) {
             // Refresh all processes to catch newly spawned msedgewebview2.exe renderers
             sys.refresh_all();
             let (total_mem_mb, pids) = get_app_tree_memory_mb(&sys, root_pid);
+            let available_system_ram_mb = sys.available_memory() / (1024 * 1024);
 
             let now_kolkata = Utc::now().with_timezone(&Kolkata);
             let current_hour = now_kolkata.hour();
@@ -207,10 +265,10 @@ pub fn start_memory_watchdog(app: AppHandle) {
             let today_str = now_kolkata.format("%Y-%m-%d").to_string();
 
             // Periodic diagnostic memory log every 5 minutes or when RAM is elevated
-            if loop_counter % 5 == 0 || total_mem_mb >= TRIM_MEMORY_THRESHOLD_MB {
+            if loop_counter % 5 == 0 || total_mem_mb >= dynamic_trim_threshold_mb {
                 crate::services::logging::log_info(&format!(
-                    "[Diagnostics] App Tree RAM: {} MB across {} processes | System Idle: {} min | Time: {:02}:{:02} IST",
-                    total_mem_mb, pids.len(), idle_min, current_hour, current_minute
+                    "[Diagnostics] App RAM: {} MB across {} procs | PC Free RAM: {} MB / {} MB | Idle: {} min | Time: {:02}:{:02} IST",
+                    total_mem_mb, pids.len(), available_system_ram_mb, total_system_ram_mb, idle_min, current_hour, current_minute
                 ));
             }
 
@@ -226,29 +284,57 @@ pub fn start_memory_watchdog(app: AppHandle) {
                 }
             }
 
-            // 1. Silent Automatic RAM Trimming (Win32 EmptyWorkingSet) — completely invisible to user:
-            // Triggers automatically without ANY popup/banner, dialogue, or user disruption:
-            // - Triggers when RAM >= TRIM_MEMORY_THRESHOLD_MB (800 MB)
-            // - OR whenever user is briefly idle (>= 1 min) and RAM >= IDLE_TRIM_THRESHOLD_MB (500 MB)
-            if total_mem_mb >= TRIM_MEMORY_THRESHOLD_MB || (idle_sec >= 60 && total_mem_mb >= IDLE_TRIM_THRESHOLD_MB) {
+            // 1. Silent Adaptive RAM Trimming & DevTools Cache Purge (Zero user disruption)
+            // Triggers automatically without ANY popup/banner or page reload:
+            // - Rule A: App RAM >= dynamic_trim_threshold_mb (350MB for 4GB PC, 600MB for 8GB PC, 850MB for 16GB PC)
+            // - Rule B: Entire Host PC is running out of memory (< 500 MB free RAM)
+            // - Rule C: Fixed 30-minute interval (independent of user activity)
+            // - Rule D: User is briefly idle (>= 1 min) and RAM >= dynamic_idle_trim_mb
+            let is_threshold_crossed = total_mem_mb >= dynamic_trim_threshold_mb;
+            let is_system_low_ram = available_system_ram_mb < CRITICAL_SYSTEM_FREE_RAM_MB;
+            let is_periodic_tick = loop_counter % PERIODIC_TRIM_MINUTES == 0;
+            let is_idle_trim = idle_sec >= 60 && total_mem_mb >= dynamic_idle_trim_mb;
+
+            if is_threshold_crossed || is_system_low_ram || is_periodic_tick || is_idle_trim {
+                let trigger_reason = if is_threshold_crossed {
+                    format!("App RAM >= {} MB threshold (Current: {} MB)", dynamic_trim_threshold_mb, total_mem_mb)
+                } else if is_system_low_ram {
+                    format!("Host PC low free RAM ({} MB < {} MB)", available_system_ram_mb, CRITICAL_SYSTEM_FREE_RAM_MB)
+                } else if is_periodic_tick {
+                    format!("Scheduled {}m periodic interval", PERIODIC_TRIM_MINUTES)
+                } else {
+                    format!("Brief idle ({}s) and RAM elevated ({} MB)", idle_sec, total_mem_mb)
+                };
+
                 crate::services::logging::log_info(&format!(
-                    "[Watchdog] Silent background RAM trim executed (Total RAM: {} MB, Idle: {}s)",
-                    total_mem_mb, idle_sec
+                    "[Watchdog] Silent memory trim & DevTools cache purge triggered: {}",
+                    trigger_reason
                 ));
+
+                // A. OS Working Set release across all processes
                 trim_process_tree_memory(&pids);
+
+                // B. DevTools console references & Performance Resource Timings cleanup
+                if let Some(window) = app.get_webview_window("main") {
+                    purge_webview_cache_and_timings(&window);
+                }
             }
 
-            // 3. Soft Refresh: If RAM >= 2200 MB AND user has been idle for 15+ min, reload page cleanly
-            if total_mem_mb >= SOFT_RELOAD_IDLE_MB && is_idle {
+            // 2. Soft Refresh: If RAM >= dynamic_soft_reload_mb
+            // In a 24x7 hospital environment, staff rarely idles for 15 minutes.
+            // We safely trigger soft reload if staff has a brief micro-gap (>= 90 seconds without typing/moving mouse)
+            // or full idle (>= 15 min), completely preserving active URL and login session.
+            let is_micro_idle = idle_sec >= MICRO_IDLE_SECONDS_THRESHOLD;
+            if total_mem_mb >= dynamic_soft_reload_mb && (is_idle || is_micro_idle) {
                 if let Some(window) = app.get_webview_window("main") {
-                    soft_reload_page(&window, &format!("RAM elevated ({} MB) while idle for {} min", total_mem_mb, idle_min));
+                    soft_reload_page(&window, &format!("RAM elevated ({} MB >= {} MB) during 24x7 staff pause ({}s)", total_mem_mb, dynamic_soft_reload_mb, idle_sec));
                     trim_process_tree_memory(&pids);
                     continue;
                 }
             }
 
-            // 4. Nightly scheduled 3:00 AM - 4:00 AM Soft Refresh while system is idle
-            if current_hour >= RELAUNCH_START_HOUR && current_hour < RELAUNCH_END_HOUR && is_idle {
+            // 3. Nightly scheduled 3:00 AM - 4:00 AM Soft Refresh while system is idle
+            if current_hour >= RELAUNCH_START_HOUR && current_hour < RELAUNCH_END_HOUR && (is_idle || is_micro_idle) {
                 let already_restarted_today = get_last_restart_date(&app).as_deref() == Some(&today_str);
                 let has_minimum_uptime = start_time.elapsed().as_secs() >= MIN_UPTIME_BEFORE_NIGHTLY_RESTART_SECS;
 
@@ -256,18 +342,18 @@ pub fn start_memory_watchdog(app: AppHandle) {
                     set_last_restart_date(&app, &today_str);
                     crate::services::cleaner::clean_browser_disk_cache(&app);
                     if let Some(window) = app.get_webview_window("main") {
-                        soft_reload_page(&window, &format!("Scheduled nightly 3 AM refresh while system idle for {} min", idle_min));
+                        soft_reload_page(&window, &format!("Scheduled nightly 3 AM refresh during lull ({}s)", idle_sec));
                         trim_process_tree_memory(&pids);
                         continue;
                     }
                 }
             }
 
-            // 5. Extreme catastrophic protection: Full process restart ONLY if RAM > 3500 MB while idle
-            if total_mem_mb > HARD_RESTART_CRITICAL_MB && is_idle {
+            // 4. Extreme catastrophic protection: Full process restart ONLY if RAM > 3500 MB while idle
+            if total_mem_mb > HARD_RESTART_CRITICAL_MB && (is_idle || is_micro_idle) {
                 let reason = format!(
-                    "Critical memory exceeded ({} MB > {} MB) while idle for {} min",
-                    total_mem_mb, HARD_RESTART_CRITICAL_MB, idle_min
+                    "Critical memory exceeded ({} MB > {} MB) during pause ({}s)",
+                    total_mem_mb, HARD_RESTART_CRITICAL_MB, idle_sec
                 );
                 restart_app(&app, &reason);
                 return;
